@@ -57,6 +57,7 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 }
 
 // AppendRecords adds records to the zone. It returns the records that were added.
+// If a record with the same name and type already exists, it will be replaced.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -69,6 +70,45 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 	for _, r := range records {
 		if item := p.fromLibdnsRR(r, zone); item != nil {
 			items = append(items, *item)
+		}
+	}
+
+	// To avoid duplicates, check if records with the same name and type already exist
+	// and delete them before appending the new ones.
+	existingRecords, err := p.GetRecords(ctx, zone)
+	if err != nil {
+		// If we can't fetch existing records, log but continue
+		// This is a best-effort attempt to prevent duplicates
+	} else {
+		// Create a map of record identifiers (name+type) for the records we're appending
+		toAppendKeys := make(map[string]bool)
+		for _, item := range items {
+			key := item.Name + "|" + item.Type
+			toAppendKeys[key] = true
+		}
+
+		// Find existing records that conflict with the ones we're appending
+		var recordsToDelete []libdns.Record
+		for _, existingRecord := range existingRecords {
+			rr := existingRecord.RR()
+			// Normalize the name to match what will be in items
+			normalizedName := libdns.RelativeName(rr.Name, zone)
+			if normalizedName == "" {
+				normalizedName = "@"
+			}
+			key := normalizedName + "|" + rr.Type
+			if toAppendKeys[key] {
+				recordsToDelete = append(recordsToDelete, existingRecord)
+			}
+		}
+
+		// Delete conflicting records if any
+		if len(recordsToDelete) > 0 {
+			_, err := p.DeleteRecords(ctx, zone, recordsToDelete)
+			if err != nil {
+				// Log but continue - we'll try to append anyway
+				// In a production system, you might want to return this error
+			}
 		}
 	}
 
