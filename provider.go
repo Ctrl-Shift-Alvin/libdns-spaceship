@@ -229,10 +229,10 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 
 			if !exactMatch {
 				// No exact match found. Replace all existing records with this Name+Type
-				// with the requested record(s).
+				// with the requested record.
 				// Note: If there are multiple existing records with the same Name+Type (e.g.,
 				// round-robin A records), they will all be removed and replaced with only the
-				// requested record(s). To keep multiple records of the same Name+Type, include
+				// requested record. To keep multiple records of the same Name+Type, include
 				// them all in the SetRecords request.
 				for _, existingSR := range existingRecordsForKey {
 					if existingRecord := p.toLibdnsRR(existingSR, zone); existingRecord != nil {
@@ -250,8 +250,8 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 	}
 
 	// Remove old records that were replaced using DELETE first
-	// By removing first, if the Add operation fails, we won't end up with duplicate records.
-	// If Remove fails, we return an error without attempting the Add, so no duplicates are created.
+	// By removing first, if Remove fails we return early without adding, avoiding duplicate records.
+	// If Remove succeeds but Add fails, we can retry the Add operation on the next attempt.
 	if len(recordsToRemove) > 0 {
 		_, err := p.DeleteRecords(ctx, zone, recordsToRemove)
 		if err != nil {
@@ -316,7 +316,7 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion, getFlag func(*int) int) bool {
 	case "CAA":
 		return getFlag(r1.Flag) == getFlag(r2.Flag) && r1.Tag == r2.Tag && r1.Value == r2.Value
 	case "HTTPS":
-		// Compare HTTPS record fields - both svcTarget and targetName should match
+		// Compare HTTPS record fields - both SvcTarget and TargetName should match
 		return r1.SvcPriority == r2.SvcPriority &&
 			r1.SvcTarget == r2.SvcTarget && r1.TargetName == r2.TargetName &&
 			r1.SvcParams == r2.SvcParams
