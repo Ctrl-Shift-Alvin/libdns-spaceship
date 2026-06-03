@@ -202,6 +202,14 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 	var recordsToAdd []spaceshipRecordUnion
 	var recordsToRemove []libdns.Record
 
+	// getFlag is a helper function that safely extracts an integer value from a pointer
+	getFlag := func(flag *int) int {
+		if flag == nil {
+			return 0
+		}
+		return *flag
+	}
+
 	for _, requestedItem := range requestedItems {
 		recordType := strings.ToUpper(requestedItem.Type)
 		key := makeRecordKey(requestedItem.Name, recordType)
@@ -212,7 +220,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			// Check if any of them match exactly (same data)
 			var exactMatch bool
 			for _, existingSR := range existingRecordsForKey {
-				if recordsAreEqual(requestedItem, existingSR) {
+				if recordsAreEqual(requestedItem, existingSR, getFlag) {
 					// Exact match found, no need to change this record
 					exactMatch = true
 					break
@@ -282,13 +290,13 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 // TTL is included in the comparison because it is part of the record's data. If the requested
 // record has a different TTL than the existing record, it will be treated as a different record
 // and will be replaced.
-func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
+func recordsAreEqual(r1, r2 spaceshipRecordUnion, getFlag func(*int) int) bool {
 	// Check basic fields - including TTL because it's part of the record's data
 	if r1.Name != r2.Name || strings.ToUpper(r1.Type) != strings.ToUpper(r2.Type) || r1.TTL != r2.TTL {
 		return false
 	}
 
-	// Check type-specific fields based on record type
+	// Check type-specific fields based on record type (normalized to uppercase once)
 	recordType := strings.ToUpper(r1.Type)
 	switch recordType {
 	case "A", "AAAA":
@@ -306,15 +314,7 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
 	case "NS":
 		return r1.Nameserver == r2.Nameserver
 	case "CAA":
-		flag1 := 0
-		if r1.Flag != nil {
-			flag1 = *r1.Flag
-		}
-		flag2 := 0
-		if r2.Flag != nil {
-			flag2 = *r2.Flag
-		}
-		return flag1 == flag2 && r1.Tag == r2.Tag && r1.Value == r2.Value
+		return getFlag(r1.Flag) == getFlag(r2.Flag) && r1.Tag == r2.Tag && r1.Value == r2.Value
 	case "HTTPS":
 		// Compare HTTPS record fields - both svcTarget and targetName should match
 		return r1.SvcPriority == r2.SvcPriority &&
@@ -324,10 +324,9 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
 		// For unknown types, return false. Unknown types cannot be reliably compared
 		// without knowing their structure. This means unknown record types will always
 		// be treated as different, which is safer than incorrectly treating them as equal.
-		// Note: This may have a performance impact if unknown record types are frequently
-		// encountered, as it will trigger deletions and re-additions even when the records
-		// may already be identical. If this becomes an issue, add support for the new
-		// record type to the comparison logic.
+		// Note: This affects correctness by causing record churn (unnecessary deletions and
+		// re-additions) for unknown record types. If this becomes an issue, add support for
+		// the new record type to the comparison logic.
 		return false
 	}
 }
