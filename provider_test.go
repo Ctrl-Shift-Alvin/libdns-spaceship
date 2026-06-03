@@ -1085,7 +1085,7 @@ func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
 		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/v1/dns/records/") {
 			var payload map[string]interface{}
 			body, _ := io.ReadAll(r.Body)
-			json.Unmarshal(body, &payload)
+			_ = json.Unmarshal(body, &payload)
 			putRequests = append(putRequests, payload)
 
 			// Update existing records
@@ -1115,7 +1115,7 @@ func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
 		if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/v1/dns/records/") {
 			var items []spaceshipRecordUnion
 			body, _ := io.ReadAll(r.Body)
-			json.Unmarshal(body, &items)
+			_ = json.Unmarshal(body, &items)
 			deleteRequests = append(deleteRequests, items)
 
 			// Remove deleted records from existing - build a new slice instead of modifying in place
