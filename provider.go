@@ -12,6 +12,14 @@ import (
 	"github.com/libdns/libdns"
 )
 
+// recordKeyDelimiter is used to create composite keys for record identification (name|type)
+const recordKeyDelimiter = "|"
+
+// makeRecordKey creates a composite key from record name and type for comparison purposes
+func makeRecordKey(name, recordType string) string {
+	return name + recordKeyDelimiter + recordType
+}
+
 // convertToLibdnsRecord moved to conversions.go
 
 // convertFromLibdnsRecord moved to conversions.go
@@ -57,6 +65,10 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 }
 
 // AppendRecords adds records to the zone. It returns the records that were added.
+// If a record with the same name and type already exists in the zone, the existing record
+// will be deleted before appending the new records. This prevents unintended duplicates from
+// existing zone records, but allows the caller to append multiple records with the same
+// name/type in a single call (they will all be appended after any existing conflicts are deleted).
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -71,6 +83,43 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 			items = append(items, *item)
 		}
 	}
+
+	// To avoid duplicates, check if records with the same name and type already exist
+	// and delete them before appending the new ones.
+	existingRecords, err := p.GetRecords(ctx, zone)
+	if err == nil {
+		// Create a map of record identifiers (name+type) for the records we're appending
+		toAppendKeys := make(map[string]bool)
+		for _, item := range items {
+			key := makeRecordKey(item.Name, item.Type)
+			toAppendKeys[key] = true
+		}
+
+		// Find existing records that conflict with the ones we're appending
+		var recordsToDelete []libdns.Record
+		for _, existingRecord := range existingRecords {
+			rr := existingRecord.RR()
+			// Normalize the name to match what will be in items
+			normalizedName := libdns.RelativeName(rr.Name, zone)
+			if normalizedName == "" {
+				normalizedName = "@"
+			}
+			key := makeRecordKey(normalizedName, rr.Type)
+			if toAppendKeys[key] {
+				recordsToDelete = append(recordsToDelete, existingRecord)
+			}
+		}
+
+		// Delete conflicting records if any
+		if len(recordsToDelete) > 0 {
+			_, _ = p.DeleteRecords(ctx, zone, recordsToDelete)
+			// Intentionally ignore deletion errors to continue with the append operation.
+			// This is best-effort; in rare cases where deletion fails, duplicate records may
+			// persist. Future improvements could add logging infrastructure to track these cases.
+		}
+	}
+	// If GetRecords fails, we continue anyway as a best-effort attempt to append.
+	// The duplicate prevention check is skipped but the append operation proceeds.
 
 	payload := map[string]interface{}{
 		"force": false,

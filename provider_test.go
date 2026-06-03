@@ -1073,6 +1073,146 @@ func TestLive_MoreTypes(t *testing.T) {
 	}
 }
 
+// TestAppendRecords_NoDuplicateARecords verifies that AppendRecords doesn't create
+// duplicate records when the same host name is appended multiple times.
+func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
+	// Create a mock API that tracks PUT requests and maintains state
+	var putRequests []map[string]interface{}
+	var deleteRequests [][]spaceshipRecordUnion
+	var existingRecords []spaceshipRecordUnion
+
+	mockRoundTrip := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/v1/dns/records/") {
+			var payload map[string]interface{}
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &payload)
+			putRequests = append(putRequests, payload)
+
+			// Update existing records
+			if items, ok := payload["items"].([]interface{}); ok {
+				for _, item := range items {
+					itemMap := item.(map[string]interface{})
+					rec := spaceshipRecordUnion{
+						ResourceRecordBase: ResourceRecordBase{
+							Name: itemMap["name"].(string),
+							Type: itemMap["type"].(string),
+							TTL:  int(itemMap["ttl"].(float64)),
+						},
+					}
+					if addr, ok := itemMap["address"].(string); ok {
+						rec.Address = addr
+					}
+					existingRecords = append(existingRecords, rec)
+				}
+			}
+
+			return &http.Response{
+				StatusCode: 204,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/v1/dns/records/") {
+			var items []spaceshipRecordUnion
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &items)
+			deleteRequests = append(deleteRequests, items)
+
+			// Remove deleted records from existing - build a new slice instead of modifying in place
+			var newExistingRecords []spaceshipRecordUnion
+			for _, existItem := range existingRecords {
+				keep := true
+				for _, delItem := range items {
+					if existItem.Name == delItem.Name && existItem.Type == delItem.Type {
+						keep = false
+						break
+					}
+				}
+				if keep {
+					newExistingRecords = append(newExistingRecords, existItem)
+				}
+			}
+			existingRecords = newExistingRecords
+
+			return &http.Response{
+				StatusCode: 204,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if r.Method == "GET" && strings.Contains(r.URL.Path, "/v1/dns/records/") {
+			// Return the current existing records
+			resp := listResponse{Items: existingRecords, Total: len(existingRecords)}
+			respBody, _ := json.Marshal(resp)
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(string(respBody))),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	})
+
+	provider := newTestProvider()
+	provider.HTTPClient = &http.Client{Transport: mockRoundTrip}
+
+	zone := "example.com"
+
+	// First append: add a new A record for "test" -> "1.2.3.4"
+	aRec1 := libdns.Address{
+		Name: "test",
+		TTL:  300 * time.Second,
+		IP:   netip.MustParseAddr("1.2.3.4"),
+	}
+	_, err := provider.AppendRecords(context.Background(), zone, []libdns.Record{aRec1})
+	if err != nil {
+		t.Fatalf("First AppendRecords failed: %v", err)
+	}
+
+	// Second append: add a new A record for the same name "test" but different IP -> "5.6.7.8"
+	aRec2 := libdns.Address{
+		Name: "test",
+		TTL:  300 * time.Second,
+		IP:   netip.MustParseAddr("5.6.7.8"),
+	}
+	_, err = provider.AppendRecords(context.Background(), zone, []libdns.Record{aRec2})
+	if err != nil {
+		t.Fatalf("Second AppendRecords failed: %v", err)
+	}
+
+	// Verify that the first record was deleted before appending the second one
+	// We should have exactly one DELETE request and two PUT requests
+	if len(deleteRequests) != 1 {
+		t.Fatalf("Expected 1 DELETE request, got %d", len(deleteRequests))
+	}
+
+	if len(putRequests) != 2 {
+		t.Fatalf("Expected 2 PUT requests, got %d", len(putRequests))
+	}
+
+	// Verify the DELETE request contained the old record
+	if len(deleteRequests[0]) != 1 {
+		t.Fatalf("Expected 1 record in DELETE request, got %d", len(deleteRequests[0]))
+	}
+
+	deletedRecord := deleteRequests[0][0]
+	if deletedRecord.Name != "test" || deletedRecord.Type != "A" {
+		t.Fatalf("Unexpected deleted record: Name=%s, Type=%s", deletedRecord.Name, deletedRecord.Type)
+	}
+
+	// Verify the second PUT request contains the new IP
+	secondPUT := putRequests[1]
+	items := secondPUT["items"].([]interface{})
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 item in second PUT, got %d", len(items))
+	}
+
+	itemMap := items[0].(map[string]interface{})
+	if itemMap["address"] != "5.6.7.8" {
+		t.Fatalf("Expected new IP 5.6.7.8 in second PUT, got %v", itemMap["address"])
+	}
+}
+
 // If a .env file exists, load its key=value pairs into the environment so
 // `go test` picks up the same values the run-tests.sh script would.
 func init() {
