@@ -147,12 +147,15 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 }
 
 // SetRecords sets the records in the zone by saving the provided records.
-// It implements a "Lookup-before-Update" strategy:
-// 1. Records with IDs are updated via PATCH
-// 2. Records without IDs trigger a GetRecords call to find matches by Name and Type
-// 3. Matched records are updated via PATCH using the retrieved ID
-// 4. Unmatched records are created via PUT with force:false
-// This strategy prevents duplicate records even when ProviderData is dropped by the controller.
+// It implements a simple and consistent strategy:
+// 1. Get all current records in the zone
+// 2. For each requested record:
+//    - If it already exists with the same data, leave it alone
+//    - If a record with the same Name+Type exists but different data, mark old for deletion
+//    - If the record is new, mark it for addition
+// 3. Add the new/replacement records (PUT with force:false)
+// 4. Remove the old records that were replaced (DELETE)
+// This ensures we only touch the requested hosts (by Name+Type) and leave everything else untouched.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -160,130 +163,154 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 
 	zone = strings.TrimSuffix(zone, ".")
 
-	// Separate records into two groups: those with IDs (updates) and those without (might be updates or creates)
-	var recordsWithIDs []spaceshipRecordUnion
-	var recordsWithoutIDs []spaceshipRecordUnion
-	var recordsToUpdate []spaceshipRecordUnion
-	var recordsToCreate []spaceshipRecordUnion
-
+	// Convert requested records to spaceshipRecordUnion format
+	var requestedItems []spaceshipRecordUnion
 	for _, r := range records {
 		if item := p.fromLibdnsRR(r, zone); item != nil {
-			if item.ID != "" {
-				// Record has an ID, so it's definitely an existing record that needs to be updated
-				recordsWithIDs = append(recordsWithIDs, *item)
-			} else {
-				// Record has no ID, so we need to look it up by Name and Type
-				recordsWithoutIDs = append(recordsWithoutIDs, *item)
-			}
+			// Clear the ID since we want to match by Name+Type, not by ID
+			item.ID = ""
+			requestedItems = append(requestedItems, *item)
 		}
 	}
 
-	// For records without IDs, perform lookup-before-update strategy
-	if len(recordsWithoutIDs) > 0 {
-		existingRecords, err := p.GetRecords(ctx, zone)
-		if err != nil {
-			// If GetRecords fails, treat all records without IDs as creates (best-effort)
-			// This is a fallback strategy when we cannot perform the lookup-before-update.
-			// Note: This may result in duplicate records if the failure is transient and
-			// the records already exist in the zone. In production, error handling/logging
-			// could be improved to track and retry these cases.
-			recordsToCreate = append(recordsToCreate, recordsWithoutIDs...)
+	// Get all current records in the zone
+	existingRecords, err := p.GetRecords(ctx, zone)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current records: %w", err)
+	}
+
+	// Build a map of existing records by Name+Type for matching
+	existingByNameType := make(map[string][]spaceshipRecordUnion)
+	for _, existingRecord := range existingRecords {
+		rr := existingRecord.RR()
+		normalizedName := libdns.RelativeName(rr.Name, zone)
+		if normalizedName == "" {
+			normalizedName = "@"
+		}
+		recordType := strings.ToUpper(rr.Type)
+		key := makeRecordKey(normalizedName, recordType)
+
+		// Extract the spaceshipRecordUnion from ProviderData
+		if existingSR := getSpaceshipRecordUnion(existingRecord); existingSR != nil {
+			existingByNameType[key] = append(existingByNameType[key], *existingSR)
+		}
+	}
+
+	// Determine which records to add and which to remove
+	var recordsToAdd []spaceshipRecordUnion
+	var recordsToRemove []libdns.Record
+
+	for _, requestedItem := range requestedItems {
+		recordType := strings.ToUpper(requestedItem.Type)
+		key := makeRecordKey(requestedItem.Name, recordType)
+
+		existingRecordsForKey, found := existingByNameType[key]
+		if found {
+			// Found existing records with the same Name+Type
+			// Check if any of them match exactly (same data)
+			var exactMatch bool
+			for _, existingSR := range existingRecordsForKey {
+				if recordsAreEqual(requestedItem, existingSR) {
+					// Exact match found, no need to change this record
+					exactMatch = true
+					break
+				}
+			}
+
+			if !exactMatch {
+				// No exact match, so we need to replace all existing records with this Name+Type
+				for _, existingSR := range existingRecordsForKey {
+					if existingRecord := p.toLibdnsRR(existingSR, zone); existingRecord != nil {
+						recordsToRemove = append(recordsToRemove, existingRecord)
+					}
+				}
+				// Add the requested record
+				recordsToAdd = append(recordsToAdd, requestedItem)
+			}
+			// If exact match is found, we don't add or remove anything for this record
 		} else {
-			// Build a map of existing records by normalized Name and Type for fast lookup
-			// We store ALL records with each Name+Type key (not just the last one) to handle
-			// multiple records with the same name and type (e.g., multiple A records for round-robin).
-			existingByNameType := make(map[string][]spaceshipRecordUnion)
-			for _, existingRecord := range existingRecords {
-				rr := existingRecord.RR()
-				normalizedName := libdns.RelativeName(rr.Name, zone)
-				if normalizedName == "" {
-					normalizedName = "@"
-				}
-				recordType := strings.ToUpper(rr.Type)
-				key := makeRecordKey(normalizedName, recordType)
-				
-				// Extract the spaceshipRecordUnion from ProviderData
-				if existingSR := getSpaceshipRecordUnion(existingRecord); existingSR != nil && existingSR.ID != "" {
-					existingByNameType[key] = append(existingByNameType[key], *existingSR)
-				}
-			}
-
-			// Match incoming records without IDs with existing records
-			// Note: item.Name is already normalized by fromLibdnsRR to use "@" for apex
-			for _, item := range recordsWithoutIDs {
-				recordType := strings.ToUpper(item.Type)
-				key := makeRecordKey(item.Name, recordType)
-
-				if existingRecordsForKey, found := existingByNameType[key]; found {
-					// Found matching records by Name and Type
-					// Delete all existing records with this Name+Type before creating the new one
-					var recordsToDelete []libdns.Record
-					for _, existingSR := range existingRecordsForKey {
-						if existingRecord := p.toLibdnsRR(existingSR, zone); existingRecord != nil {
-							recordsToDelete = append(recordsToDelete, existingRecord)
-						}
-					}
-					if len(recordsToDelete) > 0 {
-						_, _ = p.DeleteRecords(ctx, zone, recordsToDelete)
-						// Intentionally ignore deletion errors to continue with the set operation.
-						// This is best-effort; in rare cases where deletion fails, duplicate records may
-						// persist. Future improvements could add logging infrastructure to track these cases.
-					}
-					// Treat as a new record to create after deletion
-					recordsToCreate = append(recordsToCreate, item)
-				} else {
-					// No match found, treat as a new record to create
-					recordsToCreate = append(recordsToCreate, item)
-				}
-			}
+			// No existing record with this Name+Type, so add it
+			recordsToAdd = append(recordsToAdd, requestedItem)
 		}
 	}
 
-	// Add records that already had IDs to the update list
-	recordsToUpdate = append(recordsToUpdate, recordsWithIDs...)
-
-	// Process updates first - use PATCH endpoint for individual records
-	for _, item := range recordsToUpdate {
-		endpoint := fmt.Sprintf("/v1/dns/records/%s/%s", zone, item.ID)
-		_, status, err := p.doRequest(ctx, "PATCH", endpoint, item)
-		if err != nil {
-			return nil, fmt.Errorf("failed to update record %s (ID: %s): %w", item.Name, item.ID, err)
-		}
-		if status != 200 && status != 204 {
-			return nil, fmt.Errorf("API returned unexpected status %d when updating record %s (ID: %s)", status, item.Name, item.ID)
-		}
-	}
-
-	// Process creates - use PUT endpoint for new records with force:false to avoid
-	// accidentally overwriting other records in the zone.
-	if len(recordsToCreate) > 0 {
+	// Add new/replacement records using PUT with force:false
+	if len(recordsToAdd) > 0 {
 		payload := map[string]interface{}{
 			"force": false,
-			"items": recordsToCreate,
+			"items": recordsToAdd,
 		}
 		endpoint := fmt.Sprintf("/v1/dns/records/%s", zone)
 		_, status, err := p.doRequest(ctx, "PUT", endpoint, payload)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create records: %w", err)
+			return nil, fmt.Errorf("failed to add records: %w", err)
 		}
 		if status != 204 {
 			// API should return 204. If not, still continue as best-effort.
 		}
 	}
 
-	// Return all records (both created and updated)
-	var updated []libdns.Record
-	for _, item := range recordsToCreate {
-		if record := p.toLibdnsRR(item, zone); record != nil {
-			updated = append(updated, record)
+	// Remove old records that were replaced using DELETE
+	if len(recordsToRemove) > 0 {
+		_, err := p.DeleteRecords(ctx, zone, recordsToRemove)
+		if err != nil {
+			return nil, fmt.Errorf("failed to remove old records: %w", err)
 		}
 	}
-	for _, item := range recordsToUpdate {
+
+	// Return the records that were set
+	var result []libdns.Record
+	for _, item := range requestedItems {
 		if record := p.toLibdnsRR(item, zone); record != nil {
-			updated = append(updated, record)
+			result = append(result, record)
 		}
 	}
-	return updated, nil
+	return result, nil
+}
+
+// recordsAreEqual compares two spaceshipRecordUnion records to determine if they represent
+// the same DNS record (same Name, Type, and data-specific fields).
+func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
+	// Check basic fields
+	if r1.Name != r2.Name || strings.ToUpper(r1.Type) != strings.ToUpper(r2.Type) || r1.TTL != r2.TTL {
+		return false
+	}
+
+	// Check type-specific fields based on record type
+	recordType := strings.ToUpper(r1.Type)
+	switch recordType {
+	case "A", "AAAA":
+		return r1.Address == r2.Address
+	case "TXT":
+		return r1.Value == r2.Value
+	case "CNAME":
+		return r1.Cname == r2.Cname
+	case "MX":
+		return r1.Exchange == r2.Exchange && r1.Preference == r2.Preference
+	case "SRV":
+		return r1.Service == r2.Service && r1.Protocol == r2.Protocol &&
+			r1.Priority == r2.Priority && r1.Weight == r2.Weight &&
+			r1.PortInt == r2.PortInt && r1.Target == r2.Target
+	case "NS":
+		return r1.Nameserver == r2.Nameserver
+	case "CAA":
+		flag1 := 0
+		if r1.Flag != nil {
+			flag1 = *r1.Flag
+		}
+		flag2 := 0
+		if r2.Flag != nil {
+			flag2 = *r2.Flag
+		}
+		return flag1 == flag2 && r1.Tag == r2.Tag && r1.Value == r2.Value
+	case "HTTPS":
+		return r1.SvcPriority == r2.SvcPriority &&
+			(r1.SvcTarget == r2.SvcTarget || r1.TargetName == r2.TargetName) &&
+			r1.SvcParams == r2.SvcParams
+	default:
+		// For unknown types, just compare the union fields
+		return r1 == r2
+	}
 }
 
 // DeleteRecords deletes the specified records from the zone. It returns the records that were deleted.
