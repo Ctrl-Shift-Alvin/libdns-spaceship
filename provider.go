@@ -112,11 +112,10 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 
 		// Delete conflicting records if any
 		if len(recordsToDelete) > 0 {
-			_, delErr := p.DeleteRecords(ctx, zone, recordsToDelete)
+			_, _ = p.DeleteRecords(ctx, zone, recordsToDelete)
 			// Intentionally ignore deletion errors to continue with the append operation.
 			// This is best-effort; in rare cases where deletion fails, duplicate records may
 			// persist. Future improvements could add logging infrastructure to track these cases.
-			_ = delErr
 		}
 	}
 	// If GetRecords fails, we continue anyway as a best-effort attempt to append.
