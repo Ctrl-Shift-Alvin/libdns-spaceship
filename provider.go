@@ -156,7 +156,8 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 // 3. Remove the old records that were replaced (DELETE)
 // 4. Add the new/replacement records (PUT with force:false)
 // This ensures we only touch the requested hosts (by Name+Type) and leave everything else untouched.
-// Note: Remove happens before Add for safer error handling - if Add fails, the original records remain.
+// Note: Remove happens before Add for safer error handling - by removing first, we avoid
+// duplicate records if the Add operation fails (since the old record has already been removed).
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -241,10 +242,8 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 	}
 
 	// Remove old records that were replaced using DELETE first
-	// This is done before Add to avoid duplicate records if Remove fails.
-	// By removing first:
-	// - If Remove fails, Add hasn't happened yet, so we can retry safely
-	// - If Remove succeeds but Add fails, we can retry Add without worrying about duplicates
+	// By removing first, if the Add operation fails, we won't end up with duplicate records.
+	// If Remove fails, we return an error without attempting the Add, so no duplicates are created.
 	if len(recordsToRemove) > 0 {
 		_, err := p.DeleteRecords(ctx, zone, recordsToRemove)
 		if err != nil {
@@ -326,8 +325,9 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
 		// without knowing their structure. This means unknown record types will always
 		// be treated as different, which is safer than incorrectly treating them as equal.
 		// Note: This may have a performance impact if unknown record types are frequently
-		// encountered, as it will trigger unnecessary deletions and re-additions.
-		// If this becomes an issue, add support for the new record type to the comparison logic.
+		// encountered, as it will trigger deletions and re-additions even when the records
+		// may already be identical. If this becomes an issue, add support for the new
+		// record type to the comparison logic.
 		return false
 	}
 }
