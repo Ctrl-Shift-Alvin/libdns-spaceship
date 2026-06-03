@@ -239,6 +239,18 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		}
 	}
 
+	// Remove old records that were replaced using DELETE first
+	// This is done before Add to avoid duplicate records if Remove fails.
+	// By removing first:
+	// - If Remove fails, Add hasn't happened yet, so we can retry safely
+	// - If Remove succeeds but Add fails, we can retry Add without worrying about duplicates
+	if len(recordsToRemove) > 0 {
+		_, err := p.DeleteRecords(ctx, zone, recordsToRemove)
+		if err != nil {
+			return nil, fmt.Errorf("failed to remove old records: %w", err)
+		}
+	}
+
 	// Add new/replacement records using PUT with force:false
 	if len(recordsToAdd) > 0 {
 		payload := map[string]interface{}{
@@ -255,14 +267,6 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		}
 	}
 
-	// Remove old records that were replaced using DELETE
-	if len(recordsToRemove) > 0 {
-		_, err := p.DeleteRecords(ctx, zone, recordsToRemove)
-		if err != nil {
-			return nil, fmt.Errorf("failed to remove old records: %w", err)
-		}
-	}
-
 	// Return the records that were set
 	var result []libdns.Record
 	for _, item := range requestedItems {
@@ -274,9 +278,12 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 }
 
 // recordsAreEqual compares two spaceshipRecordUnion records to determine if they represent
-// the same DNS record (same Name, Type, and data-specific fields).
+// the same DNS record (same Name, Type, TTL, and data-specific fields).
+// TTL is included in the comparison because it is part of the record's data. If the requested
+// record has a different TTL than the existing record, it will be treated as a different record
+// and will be replaced.
 func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
-	// Check basic fields
+	// Check basic fields - including TTL because it's part of the record's data
 	if r1.Name != r2.Name || strings.ToUpper(r1.Type) != strings.ToUpper(r2.Type) || r1.TTL != r2.TTL {
 		return false
 	}
@@ -314,7 +321,9 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
 			r1.SvcTarget == r2.SvcTarget && r1.TargetName == r2.TargetName &&
 			r1.SvcParams == r2.SvcParams
 	default:
-		// For unknown types, return false (cannot reliably compare unknown types)
+		// For unknown types, return false. Unknown types cannot be reliably compared
+		// without knowing their structure. This means unknown record types will always
+		// be treated as different, which is safer than incorrectly treating them as equal.
 		return false
 	}
 }
