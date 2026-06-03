@@ -105,11 +105,12 @@ func (p *Provider) toLibdnsRR(sr spaceshipRecordUnion, zone string) libdns.Recor
 // Returns nil for unsupported record types
 func (p *Provider) fromLibdnsRR(lr libdns.Record, zone string) *spaceshipRecordUnion {
 	rr := lr.RR()
-	name := rr.Name
+	// Spaceship API expects relative names, not FQDNs.
+	// If the name equals the zone, RelativeName returns an empty string,
+	// which Spaceship represents as "@".
+	name := libdns.RelativeName(rr.Name, zone)
 	if name == "" {
 		name = "@"
-	} else {
-		name = libdns.AbsoluteName(rr.Name, zone)
 	}
 	rec := spaceshipRecordUnion{ResourceRecordBase: ResourceRecordBase{Name: name, Type: strings.ToUpper(rr.Type), TTL: int(rr.TTL.Seconds())}}
 
