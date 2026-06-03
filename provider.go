@@ -147,10 +147,12 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 }
 
 // SetRecords sets the records in the zone by saving the provided records.
-// When a record has an ID (from ProviderData), it will be updated via PATCH.
-// When a record has no ID, it will be created via PUT with force:false.
-// Using force:false for creates prevents accidentally overwriting unrelated records
-// while still allowing the caller to manage the complete record set through multiple calls.
+// It implements a "Lookup-before-Update" strategy:
+// 1. Records with IDs are updated via PATCH
+// 2. Records without IDs trigger a GetRecords call to find matches by Name and Type
+// 3. Matched records are updated via PATCH using the retrieved ID
+// 4. Unmatched records are created via PUT with force:false
+// This strategy prevents duplicate records even when ProviderData is dropped by the controller.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -158,21 +160,76 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 
 	zone = strings.TrimSuffix(zone, ".")
 
-	// Separate records into two groups: those with IDs (updates) and those without (creates)
-	var recordsToCreate []spaceshipRecordUnion
+	// Separate records into two groups: those with IDs (updates) and those without (might be updates or creates)
+	var recordsWithIDs []spaceshipRecordUnion
+	var recordsWithoutIDs []spaceshipRecordUnion
 	var recordsToUpdate []spaceshipRecordUnion
+	var recordsToCreate []spaceshipRecordUnion
 
 	for _, r := range records {
 		if item := p.fromLibdnsRR(r, zone); item != nil {
 			if item.ID != "" {
-				// Record has an ID, so it's an existing record that needs to be updated
-				recordsToUpdate = append(recordsToUpdate, *item)
+				// Record has an ID, so it's definitely an existing record that needs to be updated
+				recordsWithIDs = append(recordsWithIDs, *item)
 			} else {
-				// Record has no ID, so it's a new record to be created
-				recordsToCreate = append(recordsToCreate, *item)
+				// Record has no ID, so we need to look it up by Name and Type
+				recordsWithoutIDs = append(recordsWithoutIDs, *item)
 			}
 		}
 	}
+
+	// For records without IDs, perform lookup-before-update strategy
+	if len(recordsWithoutIDs) > 0 {
+		existingRecords, err := p.GetRecords(ctx, zone)
+		if err != nil {
+			// If GetRecords fails, treat all records without IDs as creates (best-effort)
+			// This is a fallback strategy when we cannot perform the lookup-before-update.
+			// Note: This may result in duplicate records if the failure is transient and
+			// the records already exist in the zone. In production, error handling/logging
+			// could be improved to track and retry these cases.
+			recordsToCreate = append(recordsToCreate, recordsWithoutIDs...)
+		} else {
+			// Build a map of existing records by normalized Name and Type for fast lookup
+			// Note: When multiple records share the same Name and Type (e.g., multiple A records
+			// for round-robin), the map will store only the last one encountered. This is a known
+			// limitation; in such cases, only that record will be updated. This matches the
+			// recommended "Match by Name and Type" strategy from the specification.
+			existingByNameType := make(map[string]spaceshipRecordUnion)
+			for _, existingRecord := range existingRecords {
+				rr := existingRecord.RR()
+				normalizedName := libdns.RelativeName(rr.Name, zone)
+				if normalizedName == "" {
+					normalizedName = "@"
+				}
+				recordType := strings.ToUpper(rr.Type)
+				key := makeRecordKey(normalizedName, recordType)
+				
+				// Extract the spaceshipRecordUnion from ProviderData
+				if existingSR := getSpaceshipRecordUnion(existingRecord); existingSR != nil && existingSR.ID != "" {
+					existingByNameType[key] = *existingSR
+				}
+			}
+
+			// Match incoming records without IDs with existing records
+			// Note: item.Name is already normalized by fromLibdnsRR to use "@" for apex
+			for _, item := range recordsWithoutIDs {
+				recordType := strings.ToUpper(item.Type)
+				key := makeRecordKey(item.Name, recordType)
+
+				if existingRecord, found := existingByNameType[key]; found {
+					// Found a matching record by Name and Type, use its ID for update
+					item.ID = existingRecord.ID
+					recordsToUpdate = append(recordsToUpdate, item)
+				} else {
+					// No match found, treat as a new record to create
+					recordsToCreate = append(recordsToCreate, item)
+				}
+			}
+		}
+	}
+
+	// Add records that already had IDs to the update list
+	recordsToUpdate = append(recordsToUpdate, recordsWithIDs...)
 
 	// Process updates first - use PATCH endpoint for individual records
 	for _, item := range recordsToUpdate {
@@ -187,8 +244,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 	}
 
 	// Process creates - use PUT endpoint for new records with force:false to avoid
-	// accidentally overwriting other records in the zone. New records are identified
-	// by the absence of an ID from the previous GetRecords call.
+	// accidentally overwriting other records in the zone.
 	if len(recordsToCreate) > 0 {
 		payload := map[string]interface{}{
 			"force": false,
