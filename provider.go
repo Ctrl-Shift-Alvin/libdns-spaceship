@@ -151,11 +151,12 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 // 1. Get all current records in the zone
 // 2. For each requested record:
 //    - If it already exists with the same data, leave it alone
-//    - If a record with the same Name+Type exists but different data, mark old for deletion
+//    - If a record with the same Name+Type exists but different data, mark old for removal
 //    - If the record is new, mark it for addition
-// 3. Add the new/replacement records (PUT with force:false)
-// 4. Remove the old records that were replaced (DELETE)
+// 3. Remove the old records that were replaced (DELETE)
+// 4. Add the new/replacement records (PUT with force:false)
 // This ensures we only touch the requested hosts (by Name+Type) and leave everything else untouched.
+// Note: Remove happens before Add for safer error handling - if Add fails, the original records remain.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -324,6 +325,9 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
 		// For unknown types, return false. Unknown types cannot be reliably compared
 		// without knowing their structure. This means unknown record types will always
 		// be treated as different, which is safer than incorrectly treating them as equal.
+		// Note: This may have a performance impact if unknown record types are frequently
+		// encountered, as it will trigger unnecessary deletions and re-additions.
+		// If this becomes an issue, add support for the new record type to the comparison logic.
 		return false
 	}
 }
