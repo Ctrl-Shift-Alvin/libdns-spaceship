@@ -190,11 +190,9 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			recordsToCreate = append(recordsToCreate, recordsWithoutIDs...)
 		} else {
 			// Build a map of existing records by normalized Name and Type for fast lookup
-			// Note: When multiple records share the same Name and Type (e.g., multiple A records
-			// for round-robin), the map will store only the last one encountered. This is a known
-			// limitation; in such cases, only that record will be updated. This matches the
-			// recommended "Match by Name and Type" strategy from the specification.
-			existingByNameType := make(map[string]spaceshipRecordUnion)
+			// We store ALL records with each Name+Type key (not just the last one) to handle
+			// multiple records with the same name and type (e.g., multiple A records for round-robin).
+			existingByNameType := make(map[string][]spaceshipRecordUnion)
 			for _, existingRecord := range existingRecords {
 				rr := existingRecord.RR()
 				normalizedName := libdns.RelativeName(rr.Name, zone)
@@ -206,7 +204,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 				
 				// Extract the spaceshipRecordUnion from ProviderData
 				if existingSR := getSpaceshipRecordUnion(existingRecord); existingSR != nil && existingSR.ID != "" {
-					existingByNameType[key] = *existingSR
+					existingByNameType[key] = append(existingByNameType[key], *existingSR)
 				}
 			}
 
@@ -216,10 +214,23 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 				recordType := strings.ToUpper(item.Type)
 				key := makeRecordKey(item.Name, recordType)
 
-				if existingRecord, found := existingByNameType[key]; found {
-					// Found a matching record by Name and Type, use its ID for update
-					item.ID = existingRecord.ID
-					recordsToUpdate = append(recordsToUpdate, item)
+				if existingRecordsForKey, found := existingByNameType[key]; found {
+					// Found matching records by Name and Type
+					// Delete all existing records with this Name+Type before creating the new one
+					var recordsToDelete []libdns.Record
+					for _, existingSR := range existingRecordsForKey {
+						if existingRecord := p.toLibdnsRR(existingSR, zone); existingRecord != nil {
+							recordsToDelete = append(recordsToDelete, existingRecord)
+						}
+					}
+					if len(recordsToDelete) > 0 {
+						_, _ = p.DeleteRecords(ctx, zone, recordsToDelete)
+						// Intentionally ignore deletion errors to continue with the set operation.
+						// This is best-effort; in rare cases where deletion fails, duplicate records may
+						// persist. Future improvements could add logging infrastructure to track these cases.
+					}
+					// Treat as a new record to create after deletion
+					recordsToCreate = append(recordsToCreate, item)
 				} else {
 					// No match found, treat as a new record to create
 					recordsToCreate = append(recordsToCreate, item)
