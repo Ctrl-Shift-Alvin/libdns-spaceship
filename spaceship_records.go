@@ -21,6 +21,10 @@ type ResourceRecordBase struct {
 type spaceshipRecordUnion struct {
 	ResourceRecordBase
 
+	// ID is the unique identifier for the record in the Spaceship API
+	// This is used to differentiate between creating new records and updating existing ones
+	ID string `json:"id,omitempty"`
+
 	// type-specific fields (kept flattened for convenience)
 	Address    string      `json:"address,omitempty"`
 	Cname      string      `json:"cname,omitempty"`
@@ -64,6 +68,7 @@ func (s *spaceshipRecordUnion) UnmarshalJSON(data []byte) error {
 	}
 	unmarshal("type", &s.Type)
 	unmarshal("name", &s.Name)
+	unmarshal("id", &s.ID)
 	unmarshal("ttl", &s.TTL)
 	unmarshal("address", &s.Address)
 	unmarshal("cname", &s.Cname)

@@ -147,33 +147,67 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 }
 
 // SetRecords sets the records in the zone by saving the provided records (force update).
+// When a record has an ID (from ProviderData), it will be updated. Otherwise, it will be created.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
 	}
 
 	zone = strings.TrimSuffix(zone, ".")
-	var items []spaceshipRecordUnion
+
+	// Separate records into two groups: those with IDs (updates) and those without (creates)
+	var recordsToCreate []spaceshipRecordUnion
+	var recordsToUpdate []spaceshipRecordUnion
+
 	for _, r := range records {
 		if item := p.fromLibdnsRR(r, zone); item != nil {
-			items = append(items, *item)
+			if item.ID != "" {
+				// Record has an ID, so it's an existing record that needs to be updated
+				recordsToUpdate = append(recordsToUpdate, *item)
+			} else {
+				// Record has no ID, so it's a new record to be created
+				recordsToCreate = append(recordsToCreate, *item)
+			}
 		}
 	}
-	payload := map[string]interface{}{
-		"force": true,
-		"items": items,
+
+	// Process updates first - use PATCH endpoint for individual records
+	for _, item := range recordsToUpdate {
+		endpoint := fmt.Sprintf("/v1/dns/records/%s/%s", zone, item.ID)
+		_, status, err := p.doRequest(ctx, "PATCH", endpoint, item)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update record %s (ID: %s): %w", item.Name, item.ID, err)
+		}
+		if status != 200 && status != 204 {
+			return nil, fmt.Errorf("API returned unexpected status %d when updating record %s (ID: %s)", status, item.Name, item.ID)
+		}
 	}
-	endpoint := fmt.Sprintf("/v1/dns/records/%s", zone)
-	_, status, err := p.doRequest(ctx, "PUT", endpoint, payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to set records: %w", err)
+
+	// Process creates - use POST/PUT endpoint for new records
+	if len(recordsToCreate) > 0 {
+		payload := map[string]interface{}{
+			"force": false,
+			"items": recordsToCreate,
+		}
+		endpoint := fmt.Sprintf("/v1/dns/records/%s", zone)
+		_, status, err := p.doRequest(ctx, "PUT", endpoint, payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create records: %w", err)
+		}
+		if status != 204 {
+			// API should return 204. If not, still continue as best-effort.
+		}
 	}
-	if status != 204 {
-		// API should return 204. If not, still return input records as best-effort.
-	}
+
+	// Return all records (both created and updated)
 	var updated []libdns.Record
-	for _, it := range items {
-		if record := p.toLibdnsRR(it, zone); record != nil {
+	for _, item := range recordsToCreate {
+		if record := p.toLibdnsRR(item, zone); record != nil {
+			updated = append(updated, record)
+		}
+	}
+	for _, item := range recordsToUpdate {
+		if record := p.toLibdnsRR(item, zone); record != nil {
 			updated = append(updated, record)
 		}
 	}
