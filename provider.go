@@ -66,8 +66,9 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 
 // AppendRecords adds records to the zone. It returns the records that were added.
 // If a record with the same name and type already exists in the zone, the existing record
-// will be deleted before appending the new records. This prevents duplicate records but
-// allows multiple records with the same name/type if explicitly provided in the input.
+// will be deleted before appending the new records. This prevents unintended duplicates from
+// existing zone records, but allows the caller to append multiple records with the same
+// name/type in a single call (they will all be appended after any existing conflicts are deleted).
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
