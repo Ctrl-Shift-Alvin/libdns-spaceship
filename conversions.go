@@ -9,6 +9,17 @@ import (
 	"github.com/libdns/libdns"
 )
 
+// getRecordID extracts the record ID from ProviderData if available
+func getRecordID(providerData interface{}) string {
+	if providerData == nil {
+		return ""
+	}
+	if sr, ok := providerData.(spaceshipRecordUnion); ok {
+		return sr.ID
+	}
+	return ""
+}
+
 // toLibdnsRR converts a spaceshipRecordUnion (API) to a libdns.Record
 func (p *Provider) toLibdnsRR(sr spaceshipRecordUnion, zone string) libdns.Record {
 	// normalize name relative to zone
@@ -113,6 +124,28 @@ func (p *Provider) fromLibdnsRR(lr libdns.Record, zone string) *spaceshipRecordU
 		name = "@"
 	}
 	rec := spaceshipRecordUnion{ResourceRecordBase: ResourceRecordBase{Name: name, Type: strings.ToUpper(rr.Type), TTL: int(rr.TTL.Seconds())}}
+
+	// Extract ID from ProviderData if this is an existing record being updated.
+	// The ProviderData field (if set) contains the original spaceshipRecordUnion from the API,
+	// which includes the record's ID. We need to preserve this ID for updates.
+	switch v := lr.(type) {
+	case libdns.Address:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.TXT:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.CNAME:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.MX:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.SRV:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.NS:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.CAA:
+		rec.ID = getRecordID(v.ProviderData)
+	case libdns.ServiceBinding:
+		rec.ID = getRecordID(v.ProviderData)
+	}
 
 	// MX handled specially
 	if mx, ok := lr.(libdns.MX); ok {
