@@ -12,6 +12,14 @@ import (
 	"github.com/libdns/libdns"
 )
 
+// recordKeyDelimiter is used to create composite keys for record identification (name|type)
+const recordKeyDelimiter = "|"
+
+// makeRecordKey creates a composite key from record name and type for comparison purposes
+func makeRecordKey(name, recordType string) string {
+	return name + recordKeyDelimiter + recordType
+}
+
 // convertToLibdnsRecord moved to conversions.go
 
 // convertFromLibdnsRecord moved to conversions.go
@@ -57,7 +65,9 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 }
 
 // AppendRecords adds records to the zone. It returns the records that were added.
-// If a record with the same name and type already exists, it will be replaced.
+// If a record with the same name and type already exists in the zone, the existing record
+// will be deleted before appending the new records. This prevents duplicate records but
+// allows multiple records with the same name/type if explicitly provided in the input.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -76,14 +86,11 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 	// To avoid duplicates, check if records with the same name and type already exist
 	// and delete them before appending the new ones.
 	existingRecords, err := p.GetRecords(ctx, zone)
-	if err != nil {
-		// If we can't fetch existing records, log but continue
-		// This is a best-effort attempt to prevent duplicates
-	} else {
+	if err == nil {
 		// Create a map of record identifiers (name+type) for the records we're appending
 		toAppendKeys := make(map[string]bool)
 		for _, item := range items {
-			key := item.Name + "|" + item.Type
+			key := makeRecordKey(item.Name, item.Type)
 			toAppendKeys[key] = true
 		}
 
@@ -96,7 +103,7 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 			if normalizedName == "" {
 				normalizedName = "@"
 			}
-			key := normalizedName + "|" + rr.Type
+			key := makeRecordKey(normalizedName, rr.Type)
 			if toAppendKeys[key] {
 				recordsToDelete = append(recordsToDelete, existingRecord)
 			}
@@ -104,13 +111,14 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 
 		// Delete conflicting records if any
 		if len(recordsToDelete) > 0 {
-			_, err := p.DeleteRecords(ctx, zone, recordsToDelete)
-			if err != nil {
-				// Log but continue - we'll try to append anyway
-				// In a production system, you might want to return this error
-			}
+			_, _ = p.DeleteRecords(ctx, zone, recordsToDelete)
+			// We continue even if delete fails, as the append may still succeed.
+			// Deletion errors are intentionally ignored (best-effort).
+			// Note: In rare cases where deletion fails, duplicate records may persist.
 		}
 	}
+	// If GetRecords fails, we continue anyway as a best-effort attempt to append.
+	// This ensures the append operation completes even if we can't verify existing records.
 
 	payload := map[string]interface{}{
 		"force": false,

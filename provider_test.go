@@ -1078,7 +1078,7 @@ func TestLive_MoreTypes(t *testing.T) {
 func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
 	// Create a mock API that tracks PUT requests and maintains state
 	var putRequests []map[string]interface{}
-	var deletRequests [][]spaceshipRecordUnion
+	var deleteRequests [][]spaceshipRecordUnion
 	var existingRecords []spaceshipRecordUnion
 
 	mockRoundTrip := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -1116,17 +1116,23 @@ func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
 			var items []spaceshipRecordUnion
 			body, _ := io.ReadAll(r.Body)
 			json.Unmarshal(body, &items)
-			deletRequests = append(deletRequests, items)
+			deleteRequests = append(deleteRequests, items)
 
-			// Remove deleted records from existing
-			for _, delItem := range items {
-				for i, existItem := range existingRecords {
+			// Remove deleted records from existing - build a new slice instead of modifying in place
+			var newExistingRecords []spaceshipRecordUnion
+			for _, existItem := range existingRecords {
+				keep := true
+				for _, delItem := range items {
 					if existItem.Name == delItem.Name && existItem.Type == delItem.Type {
-						existingRecords = append(existingRecords[:i], existingRecords[i+1:]...)
+						keep = false
 						break
 					}
 				}
+				if keep {
+					newExistingRecords = append(newExistingRecords, existItem)
+				}
 			}
+			existingRecords = newExistingRecords
 
 			return &http.Response{
 				StatusCode: 204,
@@ -1176,8 +1182,8 @@ func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
 
 	// Verify that the first record was deleted before appending the second one
 	// We should have exactly one DELETE request and two PUT requests
-	if len(deletRequests) != 1 {
-		t.Fatalf("Expected 1 DELETE request, got %d", len(deletRequests))
+	if len(deleteRequests) != 1 {
+		t.Fatalf("Expected 1 DELETE request, got %d", len(deleteRequests))
 	}
 
 	if len(putRequests) != 2 {
@@ -1185,11 +1191,11 @@ func TestAppendRecords_NoDuplicateARecords(t *testing.T) {
 	}
 
 	// Verify the DELETE request contained the old record
-	if len(deletRequests[0]) != 1 {
-		t.Fatalf("Expected 1 record in DELETE request, got %d", len(deletRequests[0]))
+	if len(deleteRequests[0]) != 1 {
+		t.Fatalf("Expected 1 record in DELETE request, got %d", len(deleteRequests[0]))
 	}
 
-	deletedRecord := deletRequests[0][0]
+	deletedRecord := deleteRequests[0][0]
 	if deletedRecord.Name != "test" || deletedRecord.Type != "A" {
 		t.Fatalf("Unexpected deleted record: Name=%s, Type=%s", deletedRecord.Name, deletedRecord.Type)
 	}
