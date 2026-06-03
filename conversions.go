@@ -125,8 +125,9 @@ func (p *Provider) fromLibdnsRR(lr libdns.Record, zone string) *spaceshipRecordU
 	}
 	rec := spaceshipRecordUnion{ResourceRecordBase: ResourceRecordBase{Name: name, Type: strings.ToUpper(rr.Type), TTL: int(rr.TTL.Seconds())}}
 
-	// Extract ID from ProviderData if this is an existing record being updated
-	// Try to get ProviderData from the specific record type
+	// Extract ID from ProviderData if this is an existing record being updated.
+	// The ProviderData field (if set) contains the original spaceshipRecordUnion from the API,
+	// which includes the record's ID. We need to preserve this ID for updates.
 	switch v := lr.(type) {
 	case libdns.Address:
 		rec.ID = getRecordID(v.ProviderData)

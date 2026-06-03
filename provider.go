@@ -146,8 +146,11 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 	return added, nil
 }
 
-// SetRecords sets the records in the zone by saving the provided records (force update).
-// When a record has an ID (from ProviderData), it will be updated. Otherwise, it will be created.
+// SetRecords sets the records in the zone by saving the provided records.
+// When a record has an ID (from ProviderData), it will be updated via PATCH.
+// When a record has no ID, it will be created via PUT with force:false.
+// Using force:false for creates prevents accidentally overwriting unrelated records
+// while still allowing the caller to manage the complete record set through multiple calls.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	if err := p.validateCredentials(); err != nil {
 		return nil, err
@@ -183,7 +186,9 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		}
 	}
 
-	// Process creates - use POST/PUT endpoint for new records
+	// Process creates - use PUT endpoint for new records with force:false to avoid
+	// accidentally overwriting other records in the zone. New records are identified
+	// by the absence of an ID from the previous GetRecords call.
 	if len(recordsToCreate) > 0 {
 		payload := map[string]interface{}{
 			"force": false,
