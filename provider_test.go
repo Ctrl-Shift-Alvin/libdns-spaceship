@@ -161,8 +161,8 @@ func TestProvider_ConvertFromLibdnsRecord(t *testing.T) {
 	}
 
 	result := provider.fromLibdnsRR(addr, zone)
-	if result.Name != fmt.Sprintf("test.%s", zone) {
-		t.Errorf("Expected full name, got %s", result.Name)
+	if result.Name != "test" {
+		t.Errorf("Expected relative name, got %s", result.Name)
 	}
 	if result.Type != "A" {
 		t.Errorf("Expected type A, got %s", result.Type)
@@ -380,7 +380,7 @@ func TestConvertFromLibdnsRecord_TypedRecords(t *testing.T) {
 	if !strings.Contains(httpsRec.SvcParams, "alpn=h2,h3") || !strings.Contains(httpsRec.SvcParams, "port=8443") {
 		t.Fatalf("Expected params to contain alpn and port, got: %s", httpsRec.SvcParams)
 	}
-	expectedName := fmt.Sprintf("test.%s", zone)
+	expectedName := "test"
 	if httpsRec.Name != expectedName {
 		t.Fatalf("Expected name %s, got %s", expectedName, httpsRec.Name)
 	}
