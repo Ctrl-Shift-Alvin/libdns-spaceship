@@ -20,6 +20,49 @@ func getRecordID(providerData interface{}) string {
 	return ""
 }
 
+// getSpaceshipRecordUnion extracts the spaceshipRecordUnion from ProviderData if available
+// This is used to retrieve the API response data (including ID) from libdns.Record types
+func getSpaceshipRecordUnion(record libdns.Record) *spaceshipRecordUnion {
+	if record == nil {
+		return nil
+	}
+	switch v := record.(type) {
+	case libdns.Address:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.TXT:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.CNAME:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.MX:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.SRV:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.NS:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.CAA:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	case libdns.ServiceBinding:
+		if sr, ok := v.ProviderData.(spaceshipRecordUnion); ok {
+			return &sr
+		}
+	}
+	return nil
+}
+
 // toLibdnsRR converts a spaceshipRecordUnion (API) to a libdns.Record
 func (p *Provider) toLibdnsRR(sr spaceshipRecordUnion, zone string) libdns.Record {
 	// normalize name relative to zone
