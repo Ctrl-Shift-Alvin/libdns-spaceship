@@ -183,10 +183,17 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		existingRecords, err := p.GetRecords(ctx, zone)
 		if err != nil {
 			// If GetRecords fails, treat all records without IDs as creates (best-effort)
+			// This is a fallback strategy when we cannot perform the lookup-before-update.
+			// Note: This may result in duplicate records if the failure is transient and
+			// the records already exist in the zone. In production, error handling/logging
+			// could be improved to track and retry these cases.
 			recordsToCreate = append(recordsToCreate, recordsWithoutIDs...)
 		} else {
 			// Build a map of existing records by normalized Name and Type for fast lookup
-			// The key is normalized name + type
+			// Note: When multiple records share the same Name and Type (e.g., multiple A records
+			// for round-robin), the map will store only the last one encountered. This is a known
+			// limitation; in such cases, only that record will be updated. This matches the
+			// recommended "Match by Name and Type" strategy from the specification.
 			existingByNameType := make(map[string]spaceshipRecordUnion)
 			for _, existingRecord := range existingRecords {
 				rr := existingRecord.RR()
