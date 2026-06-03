@@ -218,7 +218,12 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			}
 
 			if !exactMatch {
-				// No exact match, so we need to replace all existing records with this Name+Type
+				// No exact match found. Replace all existing records with this Name+Type
+				// with the requested record(s).
+				// Note: If there are multiple existing records with the same Name+Type (e.g.,
+				// round-robin A records), they will all be removed and replaced with only the
+				// requested record(s). To keep multiple records of the same Name+Type, include
+				// them all in the SetRecords request.
 				for _, existingSR := range existingRecordsForKey {
 					if existingRecord := p.toLibdnsRR(existingSR, zone); existingRecord != nil {
 						recordsToRemove = append(recordsToRemove, existingRecord)
@@ -304,12 +309,13 @@ func recordsAreEqual(r1, r2 spaceshipRecordUnion) bool {
 		}
 		return flag1 == flag2 && r1.Tag == r2.Tag && r1.Value == r2.Value
 	case "HTTPS":
+		// Compare HTTPS record fields - both svcTarget and targetName should match
 		return r1.SvcPriority == r2.SvcPriority &&
-			(r1.SvcTarget == r2.SvcTarget || r1.TargetName == r2.TargetName) &&
+			r1.SvcTarget == r2.SvcTarget && r1.TargetName == r2.TargetName &&
 			r1.SvcParams == r2.SvcParams
 	default:
-		// For unknown types, just compare the union fields
-		return r1 == r2
+		// For unknown types, return false (cannot reliably compare unknown types)
+		return false
 	}
 }
 
